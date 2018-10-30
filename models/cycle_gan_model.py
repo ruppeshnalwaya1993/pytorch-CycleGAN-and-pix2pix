@@ -27,8 +27,8 @@ class CycleGANModel(BaseModel):
         # specify the training losses you want to print out. The program will call base_model.get_current_losses
         self.loss_names = ['D_A', 'G_A', 'cycle_A', 'idt_A', 'D_B', 'G_B', 'cycle_B', 'idt_B']
         # specify the images you want to save/display. The program will call base_model.get_current_visuals
-        visual_names_A = ['real_A', 'fake_B', 'rec_A']
-        visual_names_B = ['real_B', 'fake_A', 'rec_B']
+        visual_names_A = ['real_A', 'real_Amask', 'fake_B', 'rec_A']
+        visual_names_B = ['real_B', 'real_Bmask', 'fake_A', 'rec_B']
         if self.isTrain and self.opt.lambda_identity > 0.0:
             visual_names_A.append('idt_A')
             visual_names_B.append('idt_B')
@@ -43,9 +43,9 @@ class CycleGANModel(BaseModel):
         # load/define networks
         # The naming conversion is different from those used in the paper
         # Code (paper): G_A (G), G_B (F), D_A (D_Y), D_B (D_X)
-        self.netG_A = networks.define_G(opt.input_nc, opt.output_nc, opt.ngf, opt.netG, opt.norm,
+        self.netG_A = networks.define_G(opt.input_nc + 1, opt.output_nc, opt.ngf, opt.netG, opt.norm,
                                         not opt.no_dropout, opt.init_type, opt.init_gain, self.gpu_ids)
-        self.netG_B = networks.define_G(opt.output_nc, opt.input_nc, opt.ngf, opt.netG, opt.norm,
+        self.netG_B = networks.define_G(opt.output_nc + 1, opt.input_nc, opt.ngf, opt.netG, opt.norm,
                                         not opt.no_dropout, opt.init_type, opt.init_gain, self.gpu_ids)
 
         if self.isTrain:
@@ -75,14 +75,28 @@ class CycleGANModel(BaseModel):
         AtoB = self.opt.direction == 'AtoB'
         self.real_A = input['A' if AtoB else 'B'].to(self.device)
         self.real_B = input['B' if AtoB else 'A'].to(self.device)
+        self.real_Amask = input['Amask' if AtoB else 'Bmask'].to(self.device)
+        self.real_Bmask = input['Bmask' if AtoB else 'Amask'].to(self.device)
         self.image_paths = input['A_paths' if AtoB else 'B_paths']
+        self.mask_paths = input['Amask_paths' if AtoB else 'Bmask_paths']
+
+    def deprocess(self, img):
+        return (img+1)/2
 
     def forward(self):
-        self.fake_B = self.netG_A(self.real_A)
-        self.rec_A = self.netG_B(self.fake_B)
+        real_A_plus_mask = torch.cat([self.real_A, self.real_Amask], 1)
+        real_B_plus_mask = torch.cat([self.real_B, self.real_Bmask], 1)
+        self.fake_B = self.netG_A(real_A_plus_mask) * self.deprocess(self.real_Amask) \
+                      + self.real_A * (1-self.deprocess(self.real_Amask))
+        fake_B_plus_Amask = torch.cat([self.fake_B, self.real_Amask], 1)
+        self.rec_A = self.netG_B(fake_B_plus_Amask) * self.deprocess(self.real_Amask) \
+                      + self.real_A * (1-self.deprocess(self.real_Amask))
 
-        self.fake_A = self.netG_B(self.real_B)
-        self.rec_B = self.netG_A(self.fake_A)
+        self.fake_A = self.netG_B(real_B_plus_mask) * self.deprocess(self.real_Bmask) \
+                      + self.real_B * (1-self.deprocess(self.real_Bmask))
+        fake_A_plus_Bmask = torch.cat([self.fake_A, self.real_Bmask], 1)
+        self.rec_B = self.netG_A(fake_A_plus_Bmask) * self.deprocess(self.real_Bmask) \
+                      + self.real_B * (1-self.deprocess(self.real_Bmask))
 
     def backward_D_basic(self, netD, real, fake):
         # Real
@@ -112,10 +126,14 @@ class CycleGANModel(BaseModel):
         # Identity loss
         if lambda_idt > 0:
             # G_A should be identity if real_B is fed.
-            self.idt_A = self.netG_A(self.real_B)
+            real_A_plus_mask = torch.cat([self.real_A, self.real_Amask], 1)
+            real_B_plus_mask = torch.cat([self.real_B, self.real_Bmask], 1)
+            self.idt_A = self.netG_A(real_B_plus_mask) * self.deprocess(self.real_Bmask) \
+                         + self.real_B * (1-self.deprocess(self.real_Bmask))
             self.loss_idt_A = self.criterionIdt(self.idt_A, self.real_B) * lambda_B * lambda_idt
             # G_B should be identity if real_A is fed.
-            self.idt_B = self.netG_B(self.real_A)
+            self.idt_B = self.netG_B(real_A_plus_mask) * self.deprocess(self.real_Amask) \
+                         + self.real_A * (1-self.deprocess(self.real_Amask))
             self.loss_idt_B = self.criterionIdt(self.idt_B, self.real_A) * lambda_A * lambda_idt
         else:
             self.loss_idt_A = 0
